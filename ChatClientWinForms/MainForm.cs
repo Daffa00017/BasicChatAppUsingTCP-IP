@@ -24,6 +24,33 @@ namespace ChatClientWinForms
         {
             InitializeComponent();
 
+            // === UI Colors ===
+            /*this.BackColor = Color.FromArgb(30, 30, 30); // dark background
+            lstMessages.BackColor = Color.Black;
+            lstMessages.ForeColor = Color.DarkGray;
+
+            lstOnline.BackColor = Color.FromArgb(40, 40, 40);
+            lstOnline.ForeColor = Color.LightGreen;
+
+            txtMessage.BackColor = Color.FromArgb(20, 20, 20);
+            txtMessage.ForeColor = Color.DarkGray;
+
+            btnSend.BackColor = Color.DodgerBlue;
+            btnSend.ForeColor = Color.DarkGray;
+
+            btnConnect.BackColor = Color.Green;
+            btnConnect.ForeColor = Color.DarkGray;
+
+            btnDisconnect.BackColor = Color.DarkRed;
+            btnDisconnect.ForeColor = Color.DarkGray;
+
+            lblServer.ForeColor = Color.DarkGray;
+            lblPort.ForeColor = Color.DarkGray;
+            lblUsername.ForeColor = Color.DarkGray;
+            lblOnline.ForeColor = Color.DarkGray;
+            lblChat.ForeColor = Color.DarkGray;*/
+
+
             // === aktifkan logger ke file ===
             Trace.Listeners.Clear();
             Trace.Listeners.Add(new TextWriterTraceListener("debug.log"));
@@ -233,5 +260,60 @@ namespace ChatClientWinForms
                 if (knownUsers.Add(nn)) lstOnline.Items.Add(nn);
             }
         }
+
+        private void lstMessages_DrawItem(object sender, DrawItemEventArgs e)
+        {
+            if (e.Index < 0) return;
+
+            string item = lstMessages.Items[e.Index].ToString();
+
+            // Extract sender and message
+            string senderName = "";
+            string body = item;
+            int open = item.IndexOf('[');
+            int close = item.IndexOf(']');
+
+            if (open == 0 && close > 0)
+            {
+                senderName = item.Substring(open + 1, close - open - 1);
+                if (close + 1 < item.Length)
+                {
+                    body = item.Substring(close + 1).TrimStart(':', ' ');
+                }
+            }
+
+            // Decide colors
+            Color nameColor = NormalizeName(senderName) == NormalizeName(client.CurrentUsername)
+                ? Color.Green
+                : Color.DarkBlue;
+
+            Color bodyColor = Color.Purple;
+
+            // Fill background
+            e.DrawBackground();
+
+            using (Brush nameBrush = new SolidBrush(nameColor))
+            using (Brush bodyBrush = new SolidBrush(bodyColor))
+            {
+                float x = e.Bounds.Left;
+                float y = e.Bounds.Top;
+
+                // Draw sender
+                if (!string.IsNullOrEmpty(senderName))
+                {
+                    string senderText = $"[{senderName}]";
+                    e.Graphics.DrawString(senderText, e.Font, nameBrush, x, y);
+
+                    SizeF senderSize = e.Graphics.MeasureString(senderText, e.Font);
+                    x += senderSize.Width + 4;
+                }
+
+                // Draw body
+                e.Graphics.DrawString(body, e.Font, bodyBrush, x, y);
+            }
+
+            e.DrawFocusRectangle();
+        }
+
     }
 }

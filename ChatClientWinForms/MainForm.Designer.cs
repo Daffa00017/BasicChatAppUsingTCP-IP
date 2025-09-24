@@ -33,6 +33,8 @@
             this.btnDisconnect = new System.Windows.Forms.Button();
             this.lstOnline = new System.Windows.Forms.ListBox();
             this.lstMessages = new System.Windows.Forms.ListBox();
+            this.lstMessages.DrawMode = System.Windows.Forms.DrawMode.OwnerDrawFixed;
+            this.lstMessages.DrawItem += new System.Windows.Forms.DrawItemEventHandler(this.lstMessages_DrawItem);
             this.txtMessage = new System.Windows.Forms.TextBox();
             this.btnSend = new System.Windows.Forms.Button();
             this.lblServer = new System.Windows.Forms.Label();
