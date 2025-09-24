@@ -1,6 +1,7 @@
-﻿//ServerCore
+﻿// ChatServerWinForms/ServerCore.cs
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Net;
@@ -11,198 +12,299 @@ using System.Threading.Tasks;
 
 namespace ChatServerWinForms
 {
-    public class ServerCore
+    public sealed class ServerCore
     {
-        private TcpListener listener;
-        private CancellationTokenSource cts;
-        private readonly ConcurrentDictionary<string, TcpClient> clients = new ConcurrentDictionary<string, TcpClient>();
-
+        // === Events ke UI ===
         public event Action<string> OnLog;
+        /// <summary>Dipanggil saat daftar user berubah. Berisi array USERNAME (bukan ID).</summary>
         public event Action<string[]> OnClientListChanged;
 
-        // shared Random for id generation (lock to avoid same-seed issues)
+        private static readonly Encoding Utf8NoBom = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
+
+
+        // === Listener & Cancel ===
+        private TcpListener _listener;
+        private CancellationTokenSource _cts;
+
+        // === Model Client ===
+        public sealed class ClientInfo
+        {
+            public string Id { get; private set; }          // unique id internal
+            public string Username { get; private set; }    // tampilan
+            public TcpClient Client { get; private set; }
+
+            public NetworkStream Stream { get { return Client.GetStream(); } }
+
+            public ClientInfo(string id, string username, TcpClient client)
+            {
+                Id = id;
+                Username = username;
+                Client = client;
+            }
+
+            public void CloseQuietly()
+            {
+                try { Client.Close(); } catch { }
+            }
+        }
+
+        // === State server: key = Id unik; value = ClientInfo ===
+        private readonly ConcurrentDictionary<string, ClientInfo> _clients =
+            new ConcurrentDictionary<string, ClientInfo>();
+
+        // === Random untuk GenerateUserIdFromName ===
         private static readonly Random _rnd = new Random();
         private static readonly object _rndLock = new object();
 
+        // =========================================================
+        // Public API
+        // =========================================================
         public void Start(int port)
         {
-            cts = new CancellationTokenSource();
-            listener = new TcpListener(IPAddress.Any, port);
-            listener.Start();
+            _cts = new CancellationTokenSource();
+            _listener = new TcpListener(IPAddress.Any, port);
+            _listener.Start();
 
-            OnLog?.Invoke($"Server started on port {port}");
-            Task.Run(() => AcceptLoop(cts.Token));
+            SafeLog("Server started on port " + port);
+            Task.Run(() => AcceptLoop(_cts.Token));
         }
 
         public void Stop()
         {
             try
             {
-                cts?.Cancel();
-                listener?.Stop();
+                if (_cts != null) _cts.Cancel();
+                if (_listener != null) _listener.Stop();
             }
             catch (Exception ex)
             {
-                OnLog?.Invoke($"Stop error: {ex.Message}");
+                SafeLog("Stop error: " + ex.Message);
             }
 
-            foreach (var kv in clients)
+            foreach (KeyValuePair<string, ClientInfo> kv in _clients)
             {
-                try { kv.Value.Close(); } catch { }
+                try { kv.Value.CloseQuietly(); } catch { }
             }
-            clients.Clear();
-            OnClientListChanged?.Invoke(Array.Empty<string>());
+            _clients.Clear();
+            FireClientListChanged();
 
-            OnLog?.Invoke("Server stopped");
+            SafeLog("Server stopped");
         }
 
+        // =========================================================
+        // Accept & Handle
+        // =========================================================
         private async Task AcceptLoop(CancellationToken token)
         {
             while (!token.IsCancellationRequested)
             {
                 try
                 {
-                    var tcpClient = await listener.AcceptTcpClientAsync().ConfigureAwait(false);
-                    OnLog?.Invoke($"Incoming connection from {tcpClient.Client.RemoteEndPoint}");
-                    // Start handler; handler will register client after reading join line
-                    _ = Task.Run(() => HandleClient(tcpClient, token));
+                    TcpClient tcp = await _listener.AcceptTcpClientAsync().ConfigureAwait(false);
+                    SafeLog("Incoming connection from " + tcp.Client.RemoteEndPoint);
+                    _ = Task.Run(() => HandleClient(tcp, token));
                 }
-                catch (ObjectDisposedException) { break; }
+                catch (ObjectDisposedException)
+                {
+                    break; // listener ditutup
+                }
                 catch (Exception ex)
                 {
-                    OnLog?.Invoke($"Accept error: {ex.Message}");
+                    SafeLog("Accept error: " + ex.Message);
                 }
             }
         }
 
-        private async Task HandleClient(TcpClient tcpClient, CancellationToken token)
+        private async Task HandleClient(TcpClient tcp, CancellationToken token)
         {
             string clientId = null;
+            string username = "Guest";
+
             try
             {
-                var stream = tcpClient.GetStream();
-                using (var reader = new StreamReader(stream, Encoding.UTF8))
+                NetworkStream ns = tcp.GetStream();
+                StreamReader reader = new StreamReader(ns, Encoding.UTF8);
+
+                // === Baris pertama: harapannya __JOIN__:<username> ===
+                string firstLine = await reader.ReadLineAsync().ConfigureAwait(false);
+                if (firstLine != null && firstLine.StartsWith("__JOIN__:", StringComparison.Ordinal))
                 {
-                    // read first line expecting join: "__JOIN__:username"
-                    string firstLine = await reader.ReadLineAsync().ConfigureAwait(false);
-                    string username = null;
-                    if (firstLine != null && firstLine.StartsWith("__JOIN__:", StringComparison.Ordinal))
+                    string parsed = firstLine.Substring("__JOIN__:".Length).Trim();
+                    if (!string.IsNullOrWhiteSpace(parsed)) username = parsed;
+                }
+                // else: kalau bukan JOIN, tetap daftarkan sebagai Guest; nanti firstLine (kalau ada) diperlakukan chat pertama
+
+                // === Registrasi ke server ===
+                clientId = GenerateUserIdFromName(username);
+                ClientInfo info = new ClientInfo(clientId, username, tcp);
+
+                if (!_clients.TryAdd(clientId, info))
+                {
+                    // antisipasi tabrakan (sangat jarang)
+                    int tries = 1;
+                    string baseId = clientId;
+                    while (!_clients.TryAdd(clientId, info))
                     {
-                        username = firstLine.Substring("__JOIN__:".Length).Trim();
-                        if (string.IsNullOrWhiteSpace(username)) username = "Guest";
+                        string suffix = Guid.NewGuid().ToString("N").Substring(0, 4);
+                        clientId = baseId + "_" + suffix + "_" + tries.ToString();
+                        info = new ClientInfo(clientId, username, tcp);
+                        tries++;
                     }
-                    else
-                    {
-                        // no proper join, fallback to Guest
-                        username = "Guest";
-                        // If firstLine is actual chat text, we'll treat it as first chat message after registration.
-                    }
+                }
 
-                    // generate human-friendly clientId based on username
-                    clientId = GenerateUserIdFromName(username);
+                SafeLog("User connected: " + username + " (id=" + clientId + ")");
+                FireClientListChanged();
 
-                    if (!clients.TryAdd(clientId, tcpClient))
-                    {
-                        // If collision (unlikely), append suffix until success
-                        int tries = 1;
-                        string baseId = clientId;
-                        while (!clients.TryAdd(clientId, tcpClient))
-                        {
-                            clientId = baseId + tries.ToString();
-                            tries++;
-                        }
-                    }
+                // 1) kirim daftar user penuh ke client BARU
+                string usersCsv = string.Join(",", _clients.Values.Select(c => c.Username));
+                SendSystem(info, "USERS " + usersCsv);
 
-                    OnLog?.Invoke($"User connected: {clientId} (name='{username}')");
-                    OnClientListChanged?.Invoke(clients.Keys.ToArray());
+                // 2) umumkan ke semua: ada yang join
+                BroadcastSystem("JOIN " + username);
 
-                    // If firstLine wasn't a join (i.e., it was a chat), handle it as first chat
-                    if (firstLine != null && !firstLine.StartsWith("__JOIN__:", StringComparison.Ordinal))
-                    {
-                        OnLog?.Invoke($"[{clientId}] {firstLine}");
-                        Broadcast($"{clientId}: {firstLine}");
-                    }
+                // Jika firstLine bukan JOIN tapi ada isinya, perlakukan sebagai chat pertama
+                if (firstLine != null && !firstLine.StartsWith("__JOIN__:", StringComparison.Ordinal))
+                {
+                    BroadcastChat(username, firstLine);
+                }
 
-                    // continue reading the rest of messages
-                    while (!token.IsCancellationRequested && tcpClient.Connected)
-                    {
-                        string line = await reader.ReadLineAsync().ConfigureAwait(false);
-                        if (line == null) break;
+                // === Loop baca chat ===
+                while (!token.IsCancellationRequested && tcp.Connected)
+                {
+                    string line = await reader.ReadLineAsync().ConfigureAwait(false);
+                    if (line == null) break; // disconnect
 
-                        OnLog?.Invoke($"[{clientId}] {line}");
-                        Broadcast($"{clientId}: {line}");
-                    }
+                    // (opsional) validasi command di sini (mis. /w)
+                    BroadcastChat(username, line);
                 }
             }
             catch (IOException)
             {
-                // connection closed by client
+                // socket closed by client; silent
             }
             catch (Exception ex)
             {
-                OnLog?.Invoke($"HandleClient error ({clientId ?? "unknown"}): {ex.Message}");
+                SafeLog("HandleClient error (" + (clientId ?? "unknown") + "): " + ex.Message);
             }
             finally
             {
+                // cleanup
                 if (!string.IsNullOrEmpty(clientId))
                 {
-                    TcpClient removed;
-                    clients.TryRemove(clientId, out removed);
+                    ClientInfo removed;
+                    if (_clients.TryRemove(clientId, out removed))
+                    {
+                        BroadcastSystem("LEAVE " + removed.Username);   // <— ganti
+                        removed.CloseQuietly();
+                    }
                 }
-                try { tcpClient.Close(); } catch { }
-                OnLog?.Invoke($"Client {clientId ?? "unknown"} disconnected");
-                OnClientListChanged?.Invoke(clients.Keys.ToArray());
+                else
+                {
+                    try { tcp.Close(); } catch { }
+                }
+
+                SafeLog("Client " + (clientId ?? "unknown") + " disconnected");
+                FireClientListChanged();
             }
         }
 
-        private void Broadcast(string message)
+        // =========================================================
+        // Broadcast helpers
+        // =========================================================
+        private void BroadcastChat(string fromUsername, string text)
         {
-            foreach (var kv in clients)
+            string line = "[" + fromUsername + "] " + text;  // <-- SATU spasi, TANPA ":" wajib
+            foreach (var ci in _clients.Values)
+            {
+                var w = new StreamWriter(ci.Stream, Utf8NoBom) { AutoFlush = true };
+                w.WriteLine(line);
+            }
+            SafeLog(line);
+        }
+
+        private void BroadcastSystem(string text)
+        {
+            string line = "[SYS] " + text;
+            foreach (ClientInfo ci in _clients.Values)
             {
                 try
                 {
-                    var writer = new StreamWriter(kv.Value.GetStream(), Encoding.UTF8) { AutoFlush = true };
-                    writer.WriteLine(message);
+                    var w = new StreamWriter(ci.Stream, Utf8NoBom) { AutoFlush = true };
+                    w.AutoFlush = true;
+                    w.WriteLine(line);
                 }
                 catch { }
+
+            }
+            SafeLog(line);
+        }
+
+        // =========================================================
+        // Utils
+        // =========================================================
+        private void SafeLog(string msg)
+        {
+            var h = OnLog;
+            if (h != null) h(msg);
+        }
+
+        private void FireClientListChanged()
+        {
+            var h = OnClientListChanged;
+            if (h != null)
+            {
+                string[] names = _clients.Values.Select(c => c.Username).ToArray();
+                h(names);
             }
         }
 
-        // generate id from name: shuffle letters + "-" + 4-char suffix (letters+digits)
+        /// <summary>
+        /// Generate ID ramah-baca dari nama + suffix acak 4 char (A-Za-z0-9)
+        /// </summary>
         private static string GenerateUserIdFromName(string name)
         {
             if (string.IsNullOrWhiteSpace(name)) name = "User";
 
-            // Normalize name: remove spaces and keep alphanumerics
-            var cleaned = new string(name.Where(char.IsLetterOrDigit).ToArray());
+            // keep alnum
+            string cleaned = new string(name.Where(char.IsLetterOrDigit).ToArray());
             if (string.IsNullOrWhiteSpace(cleaned)) cleaned = "User";
 
             char[] chars = cleaned.ToCharArray();
 
-            // shuffle chars using shared Random
+            // shuffle
             lock (_rndLock)
             {
                 for (int i = chars.Length - 1; i > 0; i--)
                 {
                     int j = _rnd.Next(i + 1);
-                    var tmp = chars[i];
+                    char tmp = chars[i];
                     chars[i] = chars[j];
                     chars[j] = tmp;
                 }
             }
 
-            // build suffix 4 chars (A-Z,a-z,0-9)
+            // suffix 4
             const string pool = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
             char[] suffix = new char[4];
             lock (_rndLock)
             {
-                for (int i = 0; i < suffix.Length; i++)
-                {
+                for (int i = 0; i < 4; i++)
                     suffix[i] = pool[_rnd.Next(pool.Length)];
-                }
             }
 
             return new string(chars) + "-" + new string(suffix);
+        }
+
+        private void SendSystem(ClientInfo target, string text)
+        {
+            try
+            {
+                string line = "[SYS] " + text;
+                var w = new StreamWriter(target.Stream, Utf8NoBom) { AutoFlush = true };
+                w.WriteLine(line);
+                SafeLog(line);
+            }
+            catch { }
         }
     }
 }

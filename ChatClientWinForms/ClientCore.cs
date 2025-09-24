@@ -19,6 +19,7 @@ namespace ChatClientWinForms
         private CancellationTokenSource cts;
 
         public bool IsConnected { get; private set; }
+        public string CurrentUsername { get; private set; } = "";
 
         // events
         public event Action<string> OnLog; // raw event for UI logs/messages
@@ -40,7 +41,8 @@ namespace ChatClientWinForms
                 try
                 {
                     if (string.IsNullOrWhiteSpace(username)) username = "Guest";
-                    writer.WriteLine("__JOIN__:" + username);
+                    CurrentUsername = username.Trim();            // <-- SIMPAN di sini
+                    writer.WriteLine("__JOIN__:" + CurrentUsername);
                 }
                 catch (Exception ex)
                 {
@@ -106,6 +108,7 @@ namespace ChatClientWinForms
         private void DisconnectInternal()
         {
             IsConnected = false;
+            CurrentUsername = "";
             try
             {
                 if (cts != null)
