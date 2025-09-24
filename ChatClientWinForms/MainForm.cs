@@ -251,7 +251,7 @@ namespace ChatClientWinForms
             }
 
             // Colors
-            var brTs = Brushes.DimGray;
+            var brTs = Brushes.Black;
             var brSys = Brushes.DarkOrange;
             var brName = it.IsMe ? Brushes.Green : Brushes.DarkBlue;
             var brBody = Brushes.Purple;
