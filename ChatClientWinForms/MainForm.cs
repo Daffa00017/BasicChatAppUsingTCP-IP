@@ -14,12 +14,25 @@ using System.Diagnostics;
 
 namespace ChatClientWinForms
 {
+    class ChatItem
+    {
+        public string Time;        // "HH:mm:ss" or ""
+        public string Tag;         // "SYS" or sender name
+        public string Body;        // message text (no [you] token needed)
+        public bool IsMe;        // true if Tag == CurrentUsername
+        public bool IsSys;       // true if Tag == "SYS"
+        public override string ToString() =>
+            (string.IsNullOrEmpty(Time) ? "" : $"[{Time}] ") + $"[{Tag}] {Body}";
+    }
+
     public partial class MainForm : Form
     {
         private ClientCore client;
         private readonly HashSet<string> knownUsers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private static readonly Regex senderRegex = new Regex(@"^\s*\[([^\]]+)\]\s*:?\s*(.*)$", RegexOptions.Compiled);
         private string _selfName = "";
+
+
         public MainForm()
         {
             InitializeComponent();
@@ -62,12 +75,6 @@ namespace ChatClientWinForms
             client.OnDisconnected += Client_OnDisconnected;
         }
 
-        private void DebugLine(string s)
-        {
-            lstMessages.Items.Add("[DEBUG] " + s);
-            lstMessages.TopIndex = lstMessages.Items.Count - 1;
-        }
-
         private static string NormalizeName(string s)
         {
             if (string.IsNullOrEmpty(s)) return "";
@@ -84,9 +91,6 @@ namespace ChatClientWinForms
             btnDisconnect.Enabled = true;
             btnSend.Enabled = true;
             AddSystemMessage("Connected to server.");
-
-            // ⬇️ TAMBAHKAN BARIS INI
-            AddSystemMessage("ME = '" + client.CurrentUsername + "'");
         }
 
         private void Client_OnDisconnected()
@@ -95,7 +99,9 @@ namespace ChatClientWinForms
             btnConnect.Enabled = true;
             btnDisconnect.Enabled = false;
             btnSend.Enabled = false;
-            _selfName = ""; // <-- reset
+            knownUsers.Clear();
+            lstOnline.Items.Clear();
+
             AddSystemMessage("Disconnected from server.");
         }
 
@@ -104,97 +110,67 @@ namespace ChatClientWinForms
             if (InvokeRequired) { Invoke(new Action<string>(Client_OnLog), text); return; }
             if (string.IsNullOrEmpty(text)) return;
 
-            // --- buang BOM & whitespace di depan ---
+            // strip BOM/zero-width/whitespace
             text = text.TrimStart('\uFEFF', '\u200B', '\u200C', '\u200D', ' ', '\t', '\r', '\n');
 
-            // Pesan sistem: tampilkan apa adanya
-            if (text.StartsWith("[SYS]"))
+            // Parse: [HH:mm:ss]? then [TAG] then body
+            string ts = "", tag = "?", body = "";
+            int p = 0;
+
+            // [HH:mm:ss] optional
+            if (p < text.Length && text[p] == '[')
             {
-                // strip prefix "[SYS]" + spasi
-                string payload = text.Length > 5 ? text.Substring(5).Trim() : "";
+                int q = text.IndexOf(']', p + 1);
+                if (q > p + 1)
+                {
+                    string maybeTs = text.Substring(p + 1, q - p - 1);
+                    if (maybeTs.Length == 8 && maybeTs[2] == ':' && maybeTs[5] == ':')
+                    { ts = maybeTs; p = q + 1; while (p < text.Length && text[p] == ' ') p++; }
+                }
+            }
 
-                if (payload.StartsWith("USERS ", StringComparison.OrdinalIgnoreCase))
+            // [TAG] required (SYS or sender)
+            if (p < text.Length && text[p] == '[')
+            {
+                int q = text.IndexOf(']', p + 1);
+                if (q > p + 1)
                 {
-                    // USERS name1,name2,...
-                    string csv = payload.Substring("USERS ".Length);
-                    var names = csv.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries)
-                                   .Select(s => s.Trim());
-                    ReplaceOnlineUsers(names);
-                    // opsional: tampilkan satu baris info
-                    lstMessages.Items.Add("[SYS] Users synced");
+                    tag = text.Substring(p + 1, q - p - 1).Trim();
+                    p = q + 1;
+                    while (p < text.Length && (text[p] == ' ' || text[p] == ':')) p++;
                 }
-                else if (payload.StartsWith("JOIN ", StringComparison.OrdinalIgnoreCase))
-                {
-                    string name = payload.Substring("JOIN ".Length).Trim();
-                    if (!string.IsNullOrEmpty(name) && knownUsers.Add(name))
-                        lstOnline.Items.Add(name);
-                    lstMessages.Items.Add("[SYS] " + name + " joined");
-                }
-                else if (payload.StartsWith("LEAVE ", StringComparison.OrdinalIgnoreCase))
-                {
-                    string name = payload.Substring("LEAVE ".Length).Trim();
-                    if (!string.IsNullOrEmpty(name))
-                    {
-                        // remove from set & listbox
-                        if (knownUsers.Remove(name))
-                        {
-                            for (int i = 0; i < lstOnline.Items.Count; i++)
-                            {
-                                if (string.Equals(lstOnline.Items[i].ToString(), name, StringComparison.OrdinalIgnoreCase))
-                                {
-                                    lstOnline.Items.RemoveAt(i);
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    lstMessages.Items.Add("[SYS] " + name + " left");
-                }
-                else
-                {
-                    // fallback sys message
-                    lstMessages.Items.Add(text);
-                }
+            }
 
+            body = p < text.Length ? text.Substring(p) : "";
+
+            // Handle [SYS] control messages for Active Users
+            if (string.Equals(tag, "SYS", StringComparison.OrdinalIgnoreCase))
+            {
+                HandleSysPayload(body);                  // updates lstOnline & knownUsers
+                                                         // also show the sys line in chat (as ChatItem)
+                lstMessages.Items.Add(new ChatItem { Time = ts, Tag = "SYS", Body = body, IsSys = true });
                 lstMessages.TopIndex = lstMessages.Items.Count - 1;
                 return;
             }
 
-            // === PARSER MANUAL: cari '[' pertama & ']' sesudahnya ===
-            int open = text.IndexOf('[');
-            int close = (open >= 0) ? text.IndexOf(']', open + 1) : -1;
-
-            if (open == 0 && close > open + 1)
-            {
-                string sender = text.Substring(open + 1, close - open - 1).Trim();
-
-                string body = (close + 1 < text.Length) ? text.Substring(close + 1) : "";
-                // buang spasi/titik dua di depan body
-                int i = 0;
-                while (i < body.Length && (body[i] == ' ' || body[i] == ':')) i++;
-                if (i > 0) body = body.Substring(i);
-
-                bool fromMe = NormalizeName(sender) == NormalizeName(client.CurrentUsername);
-
-                //DebugLine($"RAW='{text}' | SENDER='{sender}' | ME='{client.CurrentUsername}' | fromMe={fromMe}");
-
-                string line = fromMe ? $"[{sender}] [you] : {body}"
-                                     : $"[{sender}] : {body}";
-                lstMessages.Items.Add(line);
-                lstMessages.TopIndex = lstMessages.Items.Count - 1;
-
-                if (!knownUsers.Contains(sender))
-                {
-                    knownUsers.Add(sender);
-                    lstOnline.Items.Add(sender);
-                }
-                return;
-            }
-
-            // Fallback: format tak dikenal (debugkan juga biar keliatan)
-            DebugLine($"RAW(no-parse)='{text}'");
-            lstMessages.Items.Add(text);
+            // Normal chat → create ChatItem and add
+            bool isMe = string.Equals(NormalizeName(tag), NormalizeName(client.CurrentUsername), StringComparison.OrdinalIgnoreCase);
+            var item = new ChatItem { Time = ts, Tag = tag, Body = body, IsMe = isMe, IsSys = false };
+            lstMessages.Items.Add(item);
             lstMessages.TopIndex = lstMessages.Items.Count - 1;
+
+            if (!string.Equals(tag, "SYS", StringComparison.OrdinalIgnoreCase) && tag != "?" && !string.IsNullOrWhiteSpace(tag))
+            {
+                if (!knownUsers.Contains(tag))
+                {
+                    knownUsers.Add(tag);
+                    lstOnline.Items.Add(tag);
+                }
+            }
+
+            //lstMessages.Items.Add(new ChatItem { Time = "", Tag = "SYS", Body = text, IsSys = true });
+            //lstMessages.TopIndex = lstMessages.Items.Count - 1;
+            return;
         }
 
         private async void btnConnect_Click(object sender, EventArgs e)
@@ -264,56 +240,80 @@ namespace ChatClientWinForms
         private void lstMessages_DrawItem(object sender, DrawItemEventArgs e)
         {
             if (e.Index < 0) return;
-
-            string item = lstMessages.Items[e.Index].ToString();
-
-            // Extract sender and message
-            string senderName = "";
-            string body = item;
-            int open = item.IndexOf('[');
-            int close = item.IndexOf(']');
-
-            if (open == 0 && close > 0)
-            {
-                senderName = item.Substring(open + 1, close - open - 1);
-                if (close + 1 < item.Length)
-                {
-                    body = item.Substring(close + 1).TrimStart(':', ' ');
-                }
-            }
-
-            // Decide colors
-            Color nameColor = NormalizeName(senderName) == NormalizeName(client.CurrentUsername)
-                ? Color.Green
-                : Color.DarkBlue;
-
-            Color bodyColor = Color.Purple;
-
-            // Fill background
             e.DrawBackground();
 
-            using (Brush nameBrush = new SolidBrush(nameColor))
-            using (Brush bodyBrush = new SolidBrush(bodyColor))
+            // Fallback if older string items are present
+            if (!(lstMessages.Items[e.Index] is ChatItem it))
             {
-                float x = e.Bounds.Left;
-                float y = e.Bounds.Top;
-
-                // Draw sender
-                if (!string.IsNullOrEmpty(senderName))
-                {
-                    string senderText = $"[{senderName}]";
-                    e.Graphics.DrawString(senderText, e.Font, nameBrush, x, y);
-
-                    SizeF senderSize = e.Graphics.MeasureString(senderText, e.Font);
-                    x += senderSize.Width + 4;
-                }
-
-                // Draw body
-                e.Graphics.DrawString(body, e.Font, bodyBrush, x, y);
+                string s = lstMessages.Items[e.Index]?.ToString() ?? "";
+                e.Graphics.DrawString(s, e.Font, SystemBrushes.WindowText, e.Bounds.Location);
+                e.DrawFocusRectangle(); return;
             }
+
+            // Colors
+            var brTs = Brushes.DimGray;
+            var brSys = Brushes.DarkOrange;
+            var brName = it.IsMe ? Brushes.Green : Brushes.DarkBlue;
+            var brBody = Brushes.Purple;
+            var brSep = SystemBrushes.WindowText;
+
+            float x = e.Bounds.Left + 2, y = e.Bounds.Top + 1;
+            void Draw(string t, Brush b)
+            {
+                if (string.IsNullOrEmpty(t)) return;
+                e.Graphics.DrawString(t, e.Font, b, x, y);
+                x += e.Graphics.MeasureString(t, e.Font).Width;
+            }
+
+            if (!string.IsNullOrEmpty(it.Time)) Draw("[" + it.Time + "] ", brTs);
+            Draw("[" + it.Tag + "]", it.IsSys ? brSys : brName);
+
+            // Show "[you] : " if it's me, otherwise just " : "
+            Draw(" ", brSep);
+            if (it.IsMe) Draw("[you] ", brName);
+            Draw(": ", brSep);
+            Draw(it.Body, brBody);
 
             e.DrawFocusRectangle();
         }
 
+
+        private void HandleSysPayload(string payload)
+        {
+            if (payload.StartsWith("USERS ", StringComparison.OrdinalIgnoreCase))
+            {
+                string csv = payload.Substring("USERS ".Length);
+                var names = csv.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries)
+                               .Select(s => s.Trim());
+                ReplaceOnlineUsers(names);
+            }
+            else if (payload.StartsWith("JOIN ", StringComparison.OrdinalIgnoreCase))
+            {
+                string name = payload.Substring("JOIN ".Length).Trim();
+                if (!string.IsNullOrEmpty(name) && knownUsers.Add(name))
+                    lstOnline.Items.Add(name);
+            }
+            else if (payload.StartsWith("LEAVE ", StringComparison.OrdinalIgnoreCase))
+            {
+                string name = payload.Substring("LEAVE ".Length).Trim();
+                if (!string.IsNullOrEmpty(name))
+                {
+                    if (knownUsers.Remove(name))
+                    {
+                        for (int i = 0; i < lstOnline.Items.Count; i++)
+                        {
+                            if (string.Equals(lstOnline.Items[i].ToString(), name, StringComparison.OrdinalIgnoreCase))
+                            {
+                                lstOnline.Items.RemoveAt(i);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            else
+            {
+            }
+        }
     }
 }

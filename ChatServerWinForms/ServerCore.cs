@@ -14,23 +14,17 @@ namespace ChatServerWinForms
 {
     public sealed class ServerCore
     {
-        // === Events ke UI ===
         public event Action<string> OnLog;
-        /// <summary>Dipanggil saat daftar user berubah. Berisi array USERNAME (bukan ID).</summary>
         public event Action<string[]> OnClientListChanged;
 
         private static readonly Encoding Utf8NoBom = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
 
-
-        // === Listener & Cancel ===
         private TcpListener _listener;
         private CancellationTokenSource _cts;
-
-        // === Model Client ===
         public sealed class ClientInfo
         {
-            public string Id { get; private set; }          // unique id internal
-            public string Username { get; private set; }    // tampilan
+            public string Id { get; private set; }          
+            public string Username { get; private set; }    
             public TcpClient Client { get; private set; }
 
             public NetworkStream Stream { get { return Client.GetStream(); } }
@@ -48,17 +42,11 @@ namespace ChatServerWinForms
             }
         }
 
-        // === State server: key = Id unik; value = ClientInfo ===
-        private readonly ConcurrentDictionary<string, ClientInfo> _clients =
-            new ConcurrentDictionary<string, ClientInfo>();
+        private readonly ConcurrentDictionary<string, ClientInfo> _clients = new ConcurrentDictionary<string, ClientInfo>();
 
-        // === Random untuk GenerateUserIdFromName ===
         private static readonly Random _rnd = new Random();
         private static readonly object _rndLock = new object();
 
-        // =========================================================
-        // Public API
-        // =========================================================
         public void Start(int port)
         {
             _cts = new CancellationTokenSource();
@@ -91,9 +79,6 @@ namespace ChatServerWinForms
             SafeLog("Server stopped");
         }
 
-        // =========================================================
-        // Accept & Handle
-        // =========================================================
         private async Task AcceptLoop(CancellationToken token)
         {
             while (!token.IsCancellationRequested)
@@ -160,7 +145,7 @@ namespace ChatServerWinForms
                 SendSystem(info, "USERS " + usersCsv);
 
                 // 2) umumkan ke semua: ada yang join
-                BroadcastSystem("JOIN " + username);
+                BroadcastSystem(username + " has joined "  );
 
                 // Jika firstLine bukan JOIN tapi ada isinya, perlakukan sebagai chat pertama
                 if (firstLine != null && !firstLine.StartsWith("__JOIN__:", StringComparison.Ordinal))
@@ -208,12 +193,10 @@ namespace ChatServerWinForms
             }
         }
 
-        // =========================================================
-        // Broadcast helpers
-        // =========================================================
         private void BroadcastChat(string fromUsername, string text)
         {
-            string line = "[" + fromUsername + "] " + text;  // <-- SATU spasi, TANPA ":" wajib
+            string ts = DateTime.Now.ToString("HH:mm:ss");
+            string line = "[" + ts + "] [" + fromUsername + "] " + text;
             foreach (var ci in _clients.Values)
             {
                 var w = new StreamWriter(ci.Stream, Utf8NoBom) { AutoFlush = true };
@@ -224,7 +207,8 @@ namespace ChatServerWinForms
 
         private void BroadcastSystem(string text)
         {
-            string line = "[SYS] " + text;
+            string ts = DateTime.Now.ToString("HH:mm:ss");
+            string line = "[" + ts + "] [SYS] " + text;
             foreach (ClientInfo ci in _clients.Values)
             {
                 try
@@ -239,9 +223,6 @@ namespace ChatServerWinForms
             SafeLog(line);
         }
 
-        // =========================================================
-        // Utils
-        // =========================================================
         private void SafeLog(string msg)
         {
             var h = OnLog;
@@ -257,21 +238,14 @@ namespace ChatServerWinForms
                 h(names);
             }
         }
-
-        /// <summary>
-        /// Generate ID ramah-baca dari nama + suffix acak 4 char (A-Za-z0-9)
-        /// </summary>
         private static string GenerateUserIdFromName(string name)
         {
             if (string.IsNullOrWhiteSpace(name)) name = "User";
-
-            // keep alnum
             string cleaned = new string(name.Where(char.IsLetterOrDigit).ToArray());
             if (string.IsNullOrWhiteSpace(cleaned)) cleaned = "User";
 
             char[] chars = cleaned.ToCharArray();
 
-            // shuffle
             lock (_rndLock)
             {
                 for (int i = chars.Length - 1; i > 0; i--)
@@ -283,7 +257,6 @@ namespace ChatServerWinForms
                 }
             }
 
-            // suffix 4
             const string pool = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
             char[] suffix = new char[4];
             lock (_rndLock)
