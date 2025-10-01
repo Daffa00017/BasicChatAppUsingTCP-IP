@@ -1,5 +1,4 @@
-﻿// ChatServerWinForms/ServerCore.cs
-using System;
+﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
@@ -21,10 +20,11 @@ namespace ChatServerWinForms
 
         private TcpListener _listener;
         private CancellationTokenSource _cts;
+
         public sealed class ClientInfo
         {
-            public string Id { get; private set; }          
-            public string Username { get; private set; }    
+            public string Id { get; private set; }
+            public string Username { get; private set; }
             public TcpClient Client { get; private set; }
 
             public NetworkStream Stream { get { return Client.GetStream(); } }
@@ -117,15 +117,13 @@ namespace ChatServerWinForms
                     string parsed = firstLine.Substring("__JOIN__:".Length).Trim();
                     if (!string.IsNullOrWhiteSpace(parsed)) username = parsed;
                 }
-                // else: kalau bukan JOIN, tetap daftarkan sebagai Guest; nanti firstLine (kalau ada) diperlakukan chat pertama
 
-                // === Registrasi ke server ===
+                // Registrasi ke server
                 clientId = GenerateUserIdFromName(username);
                 ClientInfo info = new ClientInfo(clientId, username, tcp);
 
                 if (!_clients.TryAdd(clientId, info))
                 {
-                    // antisipasi tabrakan (sangat jarang)
                     int tries = 1;
                     string baseId = clientId;
                     while (!_clients.TryAdd(clientId, info))
@@ -140,18 +138,11 @@ namespace ChatServerWinForms
                 SafeLog("User connected: " + username + " (id=" + clientId + ")");
                 FireClientListChanged();
 
-                // 1) kirim daftar user penuh ke client BARU
-                string usersCsv = string.Join(",", _clients.Values.Select(c => c.Username));
-                SendSystem(info, "USERS " + usersCsv);
+                // Kirim daftar user penuh ke client baru
+                BroadcastActiveUsers();  // Kirimkan daftar pengguna terbaru ke semua klien yang terhubung
 
-                // 2) umumkan ke semua: ada yang join
-                BroadcastSystem(username + " has joined "  );
-
-                // Jika firstLine bukan JOIN tapi ada isinya, perlakukan sebagai chat pertama
-                if (firstLine != null && !firstLine.StartsWith("__JOIN__:", StringComparison.Ordinal))
-                {
-                    BroadcastChat(username, firstLine);
-                }
+                // Umumkan ke semua: ada yang join
+                BroadcastSystem(username + " has joined");
 
                 // === Loop baca chat ===
                 while (!token.IsCancellationRequested && tcp.Connected)
@@ -159,8 +150,16 @@ namespace ChatServerWinForms
                     string line = await reader.ReadLineAsync().ConfigureAwait(false);
                     if (line == null) break; // disconnect
 
-                    // (opsional) validasi command di sini (mis. /w)
-                    BroadcastChat(username, line);
+                    // Tangani pesan pribadi jika ada
+                    if (line.StartsWith("/w"))
+                    {
+                        HandlePrivateMessage(line, username);
+                    }
+                    else
+                    {
+                        // Pesan umum
+                        BroadcastChat(username, line);
+                    }
                 }
             }
             catch (IOException)
@@ -179,7 +178,7 @@ namespace ChatServerWinForms
                     ClientInfo removed;
                     if (_clients.TryRemove(clientId, out removed))
                     {
-                        BroadcastSystem("LEAVE " + removed.Username);   // <— ganti
+                        BroadcastSystem("LEAVE " + removed.Username);   // Kirim LEAVE hanya saat disconnect
                         removed.CloseQuietly();
                     }
                 }
@@ -190,6 +189,9 @@ namespace ChatServerWinForms
 
                 SafeLog("Client " + (clientId ?? "unknown") + " disconnected");
                 FireClientListChanged();
+
+                // Setelah ada client yang keluar, kirim pembaruan daftar pengguna
+                BroadcastActiveUsers();  // Kirimkan pembaruan daftar pengguna ke semua klien
             }
         }
 
@@ -238,6 +240,7 @@ namespace ChatServerWinForms
                 h(names);
             }
         }
+
         private static string GenerateUserIdFromName(string name)
         {
             if (string.IsNullOrWhiteSpace(name)) name = "User";
@@ -278,6 +281,69 @@ namespace ChatServerWinForms
                 SafeLog(line);
             }
             catch { }
+        }
+
+        private void HandlePrivateMessage(string message, string fromUsername)
+        {
+            var parts = message.Split('-');
+            if (parts.Length < 3)
+            {
+                SendSystemToClient(fromUsername, "Format salah, gunakan format: '/pm [username] [message]'");
+                return;
+            }
+
+            string targetUsername = parts[1];
+            string privateMessage = parts[2];
+
+            // Ambil waktu sekarang
+            string currentTime = DateTime.Now.ToString("HH:mm:ss");
+            string formattedMessage = $"[{currentTime}] {fromUsername}: {privateMessage}";
+
+
+            // Mencari klien berdasarkan username
+            ClientInfo targetClient = _clients.Values.FirstOrDefault(c => c.Username.Equals(targetUsername, StringComparison.OrdinalIgnoreCase));
+
+            if (targetClient != null)
+            {
+                // Jika klien ditemukan, kirim pesan pribadi ke penerima
+                SendPrivateMessage(fromUsername, targetClient, privateMessage);
+            }
+            else
+            {
+                // Jika klien tidak ditemukan, beri tahu pengirim
+                SendSystemToClient(fromUsername, $"Pengguna {targetUsername} tidak ditemukan.");
+            }
+        }
+
+        private void SendPrivateMessage(string fromUsername, ClientInfo targetClient, string message)
+        {
+            string currentTime = DateTime.Now.ToString("HH:mm:ss");
+            string formattedMessage = $"[{currentTime}] [Whispering {targetClient.Username}] {fromUsername}: {message}";
+
+            SendSystem(targetClient, formattedMessage);  // Kirim ke penerima (targetClient) yang benar
+            SendSystemToClient(fromUsername, formattedMessage);  // Kirim pesan pribadi ke pengirim
+        }
+
+        private void SendSystemToClient(string username, string text)
+        {
+            var client = _clients.Values.FirstOrDefault(c => c.Username.Equals(username, StringComparison.OrdinalIgnoreCase));
+            if (client != null)
+            {
+                SendSystem(client, text);
+            }
+        }
+
+        // Fungsi untuk mengirim daftar pengguna aktif ke semua klien
+        private void BroadcastActiveUsers()
+        {
+            // Ambil daftar pengguna terbaru
+            string usersCsv = string.Join(",", _clients.Values.Select(c => c.Username));
+
+            // Kirimkan daftar pengguna terbaru ke semua klien
+            foreach (var client in _clients.Values)
+            {
+                SendSystem(client, "USERS " + usersCsv);  // Kirim daftar pengguna terbaru
+            }
         }
     }
 }

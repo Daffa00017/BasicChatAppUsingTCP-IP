@@ -1,92 +1,47 @@
-﻿//ChatClientWinForms.MainForm
-
-using System;
-using System.Collections.Generic;
-using System.ComponentModel;
-using System.Data;
-using System.Text.RegularExpressions;
+﻿using System;
 using System.Drawing;
 using System.Linq;
-using System.Text;
 using System.Threading.Tasks;
 using System.Windows.Forms;
-using System.Diagnostics;
 
 namespace ChatClientWinForms
 {
-    class ChatItem
+    // item yang ditampilkan di ListBox chat (biar DrawItem gampang)
+    internal sealed class ChatItem
     {
-        public string Time;        // "HH:mm:ss" or ""
-        public string Tag;         // "SYS" or sender name
-        public string Body;        // message text (no [you] token needed)
-        public bool IsMe;        // true if Tag == CurrentUsername
-        public bool IsSys;       // true if Tag == "SYS"
-        public override string ToString() =>
-            (string.IsNullOrEmpty(Time) ? "" : $"[{Time}] ") + $"[{Tag}] {Body}";
+        public string Time { get; set; }   // "HH:mm:ss" atau ""
+        public string Tag { get; set; }    // "SYS" atau nama pengirim
+        public string Body { get; set; }   // isi pesan
+        public bool IsMe { get; set; }     // true kalau Tag == CurrentUsername
+        public bool IsSys { get; set; }    // true kalau Tag == "SYS"
+
+        public override string ToString()
+            => (string.IsNullOrEmpty(Time) ? "" : $"[{Time}] ")
+               + $"[{Tag}] {Body}";
     }
 
     public partial class MainForm : Form
     {
-        private ClientCore client;
-        private readonly HashSet<string> knownUsers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        private static readonly Regex senderRegex = new Regex(@"^\s*\[([^\]]+)\]\s*:?\s*(.*)$", RegexOptions.Compiled);
-        private string _selfName = "";
-
+        private ClientCore _client;
 
         public MainForm()
         {
             InitializeComponent();
 
-            // === UI Colors ===
-            /*this.BackColor = Color.FromArgb(30, 30, 30); // dark background
-            lstMessages.BackColor = Color.Black;
-            lstMessages.ForeColor = Color.DarkGray;
-
-            lstOnline.BackColor = Color.FromArgb(40, 40, 40);
-            lstOnline.ForeColor = Color.LightGreen;
-
-            txtMessage.BackColor = Color.FromArgb(20, 20, 20);
-            txtMessage.ForeColor = Color.DarkGray;
-
-            btnSend.BackColor = Color.DodgerBlue;
-            btnSend.ForeColor = Color.DarkGray;
-
-            btnConnect.BackColor = Color.Green;
-            btnConnect.ForeColor = Color.DarkGray;
-
-            btnDisconnect.BackColor = Color.DarkRed;
-            btnDisconnect.ForeColor = Color.DarkGray;
-
-            lblServer.ForeColor = Color.DarkGray;
-            lblPort.ForeColor = Color.DarkGray;
-            lblUsername.ForeColor = Color.DarkGray;
-            lblOnline.ForeColor = Color.DarkGray;
-            lblChat.ForeColor = Color.DarkGray;*/
-
-
-            // === aktifkan logger ke file ===
-            Trace.Listeners.Clear();
-            Trace.Listeners.Add(new TextWriterTraceListener("debug.log"));
-            Trace.AutoFlush = true;
-
-            client = new ClientCore();
-            client.OnLog += Client_OnLog;
-            client.OnConnected += Client_OnConnected;
-            client.OnDisconnected += Client_OnDisconnected;
+            // init client & event
+            _client = new ClientCore();
+            _client.OnLog += Client_OnLog;
+            _client.OnConnected += Client_OnConnected;
+            _client.OnDisconnected += Client_OnDisconnected;
+            _client.OnClientListChanged += Client_OnClientListChanged;
         }
 
-        private static string NormalizeName(string s)
-        {
-            if (string.IsNullOrEmpty(s)) return "";
-            s = Regex.Replace(s, @"\s+", " ");
-            s = s.Replace("\u200B", "").Replace("\u200C", "").Replace("\u200D", "").Replace("\uFEFF", "");
-            return s.Trim().ToLowerInvariant();
-        }
-
+        // ===== Handlers dari ClientCore =====
 
         private void Client_OnConnected()
         {
             if (InvokeRequired) { Invoke((Action)Client_OnConnected); return; }
+
             btnConnect.Enabled = false;
             btnDisconnect.Enabled = true;
             btnSend.Enabled = true;
@@ -96,168 +51,154 @@ namespace ChatClientWinForms
         private void Client_OnDisconnected()
         {
             if (InvokeRequired) { Invoke((Action)Client_OnDisconnected); return; }
+
             btnConnect.Enabled = true;
             btnDisconnect.Enabled = false;
             btnSend.Enabled = false;
-            knownUsers.Clear();
-            lstOnline.Items.Clear();
 
+            lstOnline.Items.Clear();
             AddSystemMessage("Disconnected from server.");
         }
 
-        private void Client_OnLog(string text)
+        private void Client_OnLog(string line)
         {
-            if (InvokeRequired) { Invoke(new Action<string>(Client_OnLog), text); return; }
-            if (string.IsNullOrEmpty(text)) return;
+            if (InvokeRequired) { Invoke(new Action<string>(Client_OnLog), line); return; }
+            if (string.IsNullOrWhiteSpace(line)) return;
 
-            // strip BOM/zero-width/whitespace
-            text = text.TrimStart('\uFEFF', '\u200B', '\u200C', '\u200D', ' ', '\t', '\r', '\n');
+            // server sudah memformat sebagian besar line seperti:
+            // [HH:mm:ss] [SYS] text
+            // atau [HH:mm:ss] [Nama] text
+            ParseAndAddLine(line);
+        }
 
-            // Parse: [HH:mm:ss]? then [TAG] then body
-            string ts = "", tag = "?", body = "";
-            int p = 0;
-
-            // [HH:mm:ss] optional
-            if (p < text.Length && text[p] == '[')
+        private void Client_OnClientListChanged(string[] users)
+        {
+            if (InvokeRequired)
             {
-                int q = text.IndexOf(']', p + 1);
-                if (q > p + 1)
-                {
-                    string maybeTs = text.Substring(p + 1, q - p - 1);
-                    if (maybeTs.Length == 8 && maybeTs[2] == ':' && maybeTs[5] == ':')
-                    { ts = maybeTs; p = q + 1; while (p < text.Length && text[p] == ' ') p++; }
-                }
-            }
-
-            // [TAG] required (SYS or sender)
-            if (p < text.Length && text[p] == '[')
-            {
-                int q = text.IndexOf(']', p + 1);
-                if (q > p + 1)
-                {
-                    tag = text.Substring(p + 1, q - p - 1).Trim();
-                    p = q + 1;
-                    while (p < text.Length && (text[p] == ' ' || text[p] == ':')) p++;
-                }
-            }
-
-            body = p < text.Length ? text.Substring(p) : "";
-
-            // Handle [SYS] control messages for Active Users
-            if (string.Equals(tag, "SYS", StringComparison.OrdinalIgnoreCase))
-            {
-                HandleSysPayload(body);                  // updates lstOnline & knownUsers
-                                                         // also show the sys line in chat (as ChatItem)
-                lstMessages.Items.Add(new ChatItem { Time = ts, Tag = "SYS", Body = body, IsSys = true });
-                lstMessages.TopIndex = lstMessages.Items.Count - 1;
+                Invoke(new Action<string[]>(Client_OnClientListChanged), new object[] { users });
                 return;
             }
 
-            // Normal chat → create ChatItem and add
-            bool isMe = string.Equals(NormalizeName(tag), NormalizeName(client.CurrentUsername), StringComparison.OrdinalIgnoreCase);
-            var item = new ChatItem { Time = ts, Tag = tag, Body = body, IsMe = isMe, IsSys = false };
-            lstMessages.Items.Add(item);
-            lstMessages.TopIndex = lstMessages.Items.Count - 1;
-
-            if (!string.Equals(tag, "SYS", StringComparison.OrdinalIgnoreCase) && tag != "?" && !string.IsNullOrWhiteSpace(tag))
-            {
-                if (!knownUsers.Contains(tag))
-                {
-                    knownUsers.Add(tag);
-                    lstOnline.Items.Add(tag);
-                }
-            }
-
-            //lstMessages.Items.Add(new ChatItem { Time = "", Tag = "SYS", Body = text, IsSys = true });
-            //lstMessages.TopIndex = lstMessages.Items.Count - 1;
-            return;
+            lstOnline.BeginUpdate();
+            lstOnline.Items.Clear();
+            foreach (var u in users ?? Array.Empty<string>())
+                if (!string.IsNullOrWhiteSpace(u))
+                    lstOnline.Items.Add(u);
+            lstOnline.EndUpdate();
         }
+
+        // ===== UI events =====
 
         private async void btnConnect_Click(object sender, EventArgs e)
         {
             btnConnect.Enabled = false;
+
             string host = txtServer.Text.Trim();
             int port = 9000;
             int.TryParse(txtPort.Text.Trim(), out port);
             string username = txtUsername.Text.Trim();
 
-            _selfName = username; // <-- T A M B A H K A N  I N I
-
-            bool ok = await client.ConnectAsync(host, port, username).ConfigureAwait(false);
+            bool ok = await _client.ConnectAsync(host, port, username).ConfigureAwait(false);
             if (!ok)
             {
-                if (InvokeRequired) { Invoke((Action)(() => btnConnect.Enabled = true)); }
+                // balikkan status tombol di thread UI
+                if (InvokeRequired) Invoke((Action)(() => btnConnect.Enabled = true));
                 else btnConnect.Enabled = true;
-                _selfName = ""; // rollback kalau gagal
+
+                AddSystemMessage("Connect failed.");
             }
         }
 
-        private void btnDisconnect_Click(object sender, EventArgs e)
+        private async void btnDisconnect_Click(object sender, EventArgs e)
         {
-            client.Disconnect();
+            // CS4014 selesai: menunggu operasi async
+            await _client.Disconnect();
         }
 
-        private void btnSend_Click(object sender, EventArgs e)
+        private async void btnSend_Click(object sender, EventArgs e)
         {
-            SendMessageFromBox();
+            await SendMessageFromBox();
         }
 
-        private void txtMessage_KeyDown(object sender, KeyEventArgs e)
+        private async void txtMessage_KeyDown(object sender, KeyEventArgs e)
         {
             if (e.KeyCode == Keys.Enter)
             {
                 e.SuppressKeyPress = true;
-                SendMessageFromBox();
+                await SendMessageFromBox();
             }
         }
 
-        private void SendMessageFromBox()
+        // ===== Helper UI =====
+
+        private void AddSystemMessage(string msg)
+        {
+            var item = new ChatItem
+            {
+                Time = "",
+                Tag = "SYS",
+                Body = msg,
+                IsSys = true,
+                IsMe = false
+            };
+            lstMessages.Items.Add(item);
+            lstMessages.TopIndex = lstMessages.Items.Count - 1;
+        }
+
+        private async Task SendMessageFromBox()
         {
             var text = txtMessage.Text.Trim();
             if (string.IsNullOrEmpty(text)) return;
 
-            client.Send(text);      // kirim RAW ke server (tanpa prefix)
-            txtMessage.Clear();     // TIDAK menambah "[you]" di sini
+            if (text.StartsWith("/w ", StringComparison.Ordinal))
+            {
+                // format: /w <username> <pesan>
+                var parts = text.Split(new[] { ' ' }, 3, StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length < 3)
+                {
+                    AddSystemMessage("Format salah. Gunakan: /w <username> <pesan>");
+                }
+                else
+                {
+                    string target = parts[1];
+                    string body = parts[2];
+                    await _client.SendPrivateMessage(target, body);
+                }
+            }
+            else
+            {
+                await _client.SendMessageAsync(text);
+            }
+
+            txtMessage.Clear();
         }
 
-        private void AddSystemMessage(string msg)
-        {
-            lstMessages.Items.Add($"[SYS] {msg}");
-            lstMessages.TopIndex = lstMessages.Items.Count - 1;
-        }
-        private void ReplaceOnlineUsers(IEnumerable<string> names)
-        {
-            knownUsers.Clear();
-            lstOnline.Items.Clear();
-            foreach (var n in names)
-            {
-                if (string.IsNullOrWhiteSpace(n)) continue;
-                var nn = n.Trim();
-                if (knownUsers.Add(nn)) lstOnline.Items.Add(nn);
-            }
-        }
+        // ===== Owner draw untuk ListBox pesan =====
 
         private void lstMessages_DrawItem(object sender, DrawItemEventArgs e)
         {
             if (e.Index < 0) return;
+
             e.DrawBackground();
 
-            // Fallback if older string items are present
+            // handle dua kemungkinan: ChatItem / string
             if (!(lstMessages.Items[e.Index] is ChatItem it))
             {
                 string s = lstMessages.Items[e.Index]?.ToString() ?? "";
                 e.Graphics.DrawString(s, e.Font, SystemBrushes.WindowText, e.Bounds.Location);
-                e.DrawFocusRectangle(); return;
+                e.DrawFocusRectangle();
+                return;
             }
 
-            // Colors
-            var brTs = Brushes.Black;
-            var brSys = Brushes.DarkOrange;
-            var brName = it.IsMe ? Brushes.Green : Brushes.DarkBlue;
-            var brBody = Brushes.Purple;
-            var brSep = SystemBrushes.WindowText;
+            // warna
+            Brush brTs = SystemBrushes.WindowText;
+            Brush brSys = Brushes.DarkOrange;
+            Brush brName = it.IsMe ? Brushes.Green : Brushes.DarkBlue;
+            Brush brBody = SystemBrushes.WindowText;
+            Brush brSep = SystemBrushes.WindowText;
 
             float x = e.Bounds.Left + 2, y = e.Bounds.Top + 1;
+
             void Draw(string t, Brush b)
             {
                 if (string.IsNullOrEmpty(t)) return;
@@ -265,10 +206,8 @@ namespace ChatClientWinForms
                 x += e.Graphics.MeasureString(t, e.Font).Width;
             }
 
-            if (!string.IsNullOrEmpty(it.Time)) Draw("[" + it.Time + "] ", brTs);
-            Draw("[" + it.Tag + "]", it.IsSys ? brSys : brName);
-
-            // Show "[you] : " if it's me, otherwise just " : "
+            if (!string.IsNullOrEmpty(it.Time)) Draw($"[{it.Time}] ", brTs);
+            Draw($"[{it.Tag}]", it.IsSys ? brSys : brName);
             Draw(" ", brSep);
             if (it.IsMe) Draw("[you] ", brName);
             Draw(": ", brSep);
@@ -277,43 +216,50 @@ namespace ChatClientWinForms
             e.DrawFocusRectangle();
         }
 
-
-        private void HandleSysPayload(string payload)
+        // parsing ringan agar log dari server tampil rapi jadi ChatItem
+        private void ParseAndAddLine(string raw)
         {
-            if (payload.StartsWith("USERS ", StringComparison.OrdinalIgnoreCase))
+            // contoh raw: [03:14:22] [SYS] text...
+            // atau       [03:14:22] [Nama] text...
+            string ts = "", tag = "?", body = "";
+            int p = 0;
+
+            if (p < raw.Length && raw[p] == '[')
             {
-                string csv = payload.Substring("USERS ".Length);
-                var names = csv.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries)
-                               .Select(s => s.Trim());
-                ReplaceOnlineUsers(names);
-            }
-            else if (payload.StartsWith("JOIN ", StringComparison.OrdinalIgnoreCase))
-            {
-                string name = payload.Substring("JOIN ".Length).Trim();
-                if (!string.IsNullOrEmpty(name) && knownUsers.Add(name))
-                    lstOnline.Items.Add(name);
-            }
-            else if (payload.StartsWith("LEAVE ", StringComparison.OrdinalIgnoreCase))
-            {
-                string name = payload.Substring("LEAVE ".Length).Trim();
-                if (!string.IsNullOrEmpty(name))
+                int q = raw.IndexOf(']', p + 1);
+                if (q > p)
                 {
-                    if (knownUsers.Remove(name))
+                    string maybeTs = raw.Substring(p + 1, q - p - 1);
+                    if (maybeTs.Length == 8 && maybeTs[2] == ':' && maybeTs[5] == ':')
                     {
-                        for (int i = 0; i < lstOnline.Items.Count; i++)
-                        {
-                            if (string.Equals(lstOnline.Items[i].ToString(), name, StringComparison.OrdinalIgnoreCase))
-                            {
-                                lstOnline.Items.RemoveAt(i);
-                                break;
-                            }
-                        }
+                        ts = maybeTs;
+                        p = q + 1;
+                        while (p < raw.Length && raw[p] == ' ') p++;
                     }
                 }
             }
-            else
+
+            if (p < raw.Length && raw[p] == '[')
             {
+                int q = raw.IndexOf(']', p + 1);
+                if (q > p)
+                {
+                    tag = raw.Substring(p + 1, q - p - 1).Trim();
+                    p = q + 1;
+                    while (p < raw.Length && (raw[p] == ' ' || raw[p] == ':')) p++;
+                }
             }
+
+            body = p < raw.Length ? raw.Substring(p) : "";
+
+            bool isSys = string.Equals(tag, "SYS", StringComparison.OrdinalIgnoreCase);
+            bool isMe = !isSys &&
+                        !string.IsNullOrEmpty(_client?.CurrentUsername) &&
+                        string.Equals(tag, _client.CurrentUsername, StringComparison.OrdinalIgnoreCase);
+
+            var item = new ChatItem { Time = ts, Tag = tag, Body = body, IsSys = isSys, IsMe = isMe };
+            lstMessages.Items.Add(item);
+            lstMessages.TopIndex = lstMessages.Items.Count - 1;
         }
     }
 }

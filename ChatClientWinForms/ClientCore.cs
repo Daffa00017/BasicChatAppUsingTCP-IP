@@ -1,154 +1,127 @@
-﻿//ClientCore
-using System;
-using System.Collections.Generic;
+﻿using System;
 using System.IO;
-using System.Linq;
 using System.Net.Sockets;
 using System.Text;
-using System.Threading;
 using System.Threading.Tasks;
-using static System.Windows.Forms.VisualStyles.VisualStyleElement.StartPanel;
 
 namespace ChatClientWinForms
 {
     public class ClientCore
     {
-        private TcpClient tcp;
-        private StreamReader reader;
-        private StreamWriter writer;
-        private CancellationTokenSource cts;
+        private TcpClient _tcpClient;
+        private NetworkStream _stream;
+        private StreamReader _reader;
+        private StreamWriter _writer;
 
-        public bool IsConnected { get; private set; }
-        public string CurrentUsername { get; private set; } = "";
-
-        // events
-        public event Action<string> OnLog; // raw event for UI logs/messages
-        public event Action OnDisconnected;
+        public event Action<string> OnLog;
         public event Action OnConnected;
+        public event Action OnDisconnected;
+        public event Action<string[]> OnClientListChanged;
+
+        public string CurrentUsername { get; private set; }
+
+        public ClientCore()
+        {
+            _tcpClient = new TcpClient();
+        }
 
         public async Task<bool> ConnectAsync(string host, int port, string username)
         {
             try
             {
-                tcp = new TcpClient();
-                await tcp.ConnectAsync(host, port).ConfigureAwait(false);
-                var stream = tcp.GetStream();
-                reader = new StreamReader(stream);
-                writer = new StreamWriter(stream) { AutoFlush = true };
-                IsConnected = true;
+                await _tcpClient.ConnectAsync(host, port);
+                _stream = _tcpClient.GetStream();
+                _reader = new StreamReader(_stream, Encoding.UTF8);
+                _writer = new StreamWriter(_stream, Encoding.UTF8) { AutoFlush = true };
 
-                // send join line immediately
-                try
-                {
-                    if (string.IsNullOrWhiteSpace(username)) username = "Guest";
-                    CurrentUsername = username.Trim();            // <-- SIMPAN di sini
-                    writer.WriteLine("__JOIN__:" + CurrentUsername);
-                }
-                catch (Exception ex)
-                {
-                    OnLog?.Invoke($"Write join error: {ex.Message}");
-                }
+                // Kirimkan perintah JOIN untuk bergabung dengan server
+                await _writer.WriteLineAsync($"__JOIN__:{username}");
 
-                cts = new CancellationTokenSource();
-                _ = Task.Run(() => ListenLoop(cts.Token));
+                // Simpan username
+                CurrentUsername = username;
 
+                OnLog?.Invoke("Connected to server.");
                 OnConnected?.Invoke();
+
+                // Mulai mendengarkan server
+                _ = Task.Run(() => ListenForMessages());
+
                 return true;
             }
             catch (Exception ex)
             {
-                OnLog?.Invoke($"Connect error: {ex.Message}");
-                DisconnectInternal();
+                OnLog?.Invoke($"Failed to connect: {ex.Message}");
                 return false;
             }
         }
 
-        private async Task ListenLoop(CancellationToken token)
+        public async Task Disconnect()
         {
             try
             {
-                while (!token.IsCancellationRequested && tcp != null && tcp.Connected)
-                {
-                    string line = await reader.ReadLineAsync().ConfigureAwait(false);
-                    if (line == null) break;
-                    OnLog?.Invoke(line);
-                }
-            }
-            catch (Exception ex)
-            {
-                OnLog?.Invoke($"Listen error: {ex.Message}");
-            }
-            finally
-            {
-                DisconnectInternal();
+                await _writer.WriteLineAsync("DISCONNECT");
+                _tcpClient.Close();
                 OnDisconnected?.Invoke();
             }
+            catch (Exception ex)
+            {
+                OnLog?.Invoke($"Failed to disconnect: {ex.Message}");
+            }
         }
 
-        public void Send(string text)
+        public async Task SendMessageAsync(string message)
         {
-            if (!IsConnected) return;
+            if (_tcpClient.Connected)
+            {
+                await _writer.WriteLineAsync(message);
+            }
+        }
+
+        public async Task SendPrivateMessage(string targetUsername, string message)
+        {
+            if (_tcpClient.Connected)
+            {
+                string currentTime = DateTime.Now.ToString("HH:mm:ss");  // Get current time
+                string privateMessage = $"[{currentTime}] /w {targetUsername} {message}";
+                await _writer.WriteLineAsync(privateMessage);
+            }
+        }
+
+        private async Task ListenForMessages()
+        {
             try
             {
-                // send plain text newline-terminated
-                writer.WriteLine(text);
+                while (_tcpClient.Connected)
+                {
+                    string message = await _reader.ReadLineAsync();
+                    if (message == null) break;
+
+                    if (message.StartsWith("[SYS] USERS "))
+                    {
+                        // Update daftar pengguna
+                        string userList = message.Substring(12); // Ambil daftar pengguna setelah "USERS "
+                        string[] users = userList.Split(',');
+                        OnClientListChanged?.Invoke(users);
+                    }
+                    else
+                    {
+                        // If it's a private message, format it with the current time
+                        if (message.StartsWith("/w"))
+                        {
+                            string currentTime = DateTime.Now.ToString("HH:mm:ss");
+                            message = $"[{currentTime}] {message}";
+                        }
+
+                        // Log the message (including time if it's a private message)
+                        OnLog?.Invoke(message);
+                    }
+                }
             }
             catch (Exception ex)
             {
-                OnLog?.Invoke($"Send error: {ex.Message}");
+                OnLog?.Invoke($"Error while listening for messages: {ex.Message}");
             }
         }
 
-        public void Disconnect()
-        {
-            DisconnectInternal();
-            OnDisconnected?.Invoke();
-        }
-
-        private void DisconnectInternal()
-        {
-            IsConnected = false;
-            CurrentUsername = "";
-            try
-            {
-                if (cts != null)
-                {
-                    cts.Cancel();
-                    cts.Dispose();
-                    cts = null;
-                }
-            }
-            catch { }
-
-            try
-            {
-                if (writer != null)
-                {
-                    writer.Close();
-                    writer = null;
-                }
-            }
-            catch { }
-
-            try
-            {
-                if (reader != null)
-                {
-                    reader.Close();
-                    reader = null;
-                }
-            }
-            catch { }
-
-            try
-            {
-                if (tcp != null)
-                {
-                    tcp.Close();
-                    tcp = null;
-                }
-            }
-            catch { }
-        }
     }
 }
