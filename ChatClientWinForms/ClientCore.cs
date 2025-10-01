@@ -17,6 +17,8 @@ namespace ChatClientWinForms
         public event Action OnConnected;
         public event Action OnDisconnected;
         public event Action<string[]> OnClientListChanged;
+        public event Action<string, bool> OnTypingState; // (username, isTyping)
+
 
         public string CurrentUsername { get; private set; }
 
@@ -95,6 +97,36 @@ namespace ChatClientWinForms
                 {
                     string message = await _reader.ReadLineAsync();
                     if (message == null) break;
+                    if (message.StartsWith("[SYS] TYPING "))
+                    {
+                        // Example: [HH:mm:ss] [SYS] TYPING Alice on
+                        // Strip optional timestamp prefix if present
+                        string m = message;
+                        // Optional TS prefix: [HH:mm:ss] [SYS] ...
+                        if (m.StartsWith("[") && m.Length > 10)
+                        {
+                            int firstClose = m.IndexOf(']');
+                            if (firstClose >= 0 && firstClose + 2 < m.Length && m[firstClose + 2] == '[')
+                            {
+                                // remove leading "[HH:mm:ss] "
+                                m = m.Substring(firstClose + 2);
+                            }
+                        }
+
+                        // Now m like: [SYS] TYPING Alice on
+                        var parts = m.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                        // parts: ["[SYS]", "TYPING", "<username>", "on|off"]
+                        if (parts.Length >= 4)
+                        {
+                            string uname = parts[2];
+                            string state = parts[3].ToLowerInvariant();
+                            bool isTyping = state == "on";
+
+                            // Raise event for UI
+                            OnTypingState?.Invoke(uname, isTyping);
+                        }
+                        continue;
+                    }
 
                     if (message.StartsWith("[SYS] USERS "))
                     {
@@ -120,6 +152,20 @@ namespace ChatClientWinForms
             catch (Exception ex)
             {
                 OnLog?.Invoke($"Error while listening for messages: {ex.Message}");
+            }
+        }
+        public async Task SendTypingAsync(bool isTyping)
+        {
+            if (_tcpClient?.Connected == true && _writer != null && isTyping)  // Only send "on"
+            {
+                try
+                {
+                    await _writer.WriteLineAsync($"__TYPING__:on");  // Send only "on"
+                }
+                catch (Exception ex)
+                {
+                    OnLog?.Invoke($"Failed to send typing state: {ex.Message}");
+                }
             }
         }
 

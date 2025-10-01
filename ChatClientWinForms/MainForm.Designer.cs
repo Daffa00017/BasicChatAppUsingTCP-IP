@@ -1,4 +1,6 @@
-﻿using System.Windows.Forms;
+﻿using System.Drawing;
+using System.Linq;
+using System.Windows.Forms;
 
 namespace ChatClientWinForms
 {
@@ -19,6 +21,9 @@ namespace ChatClientWinForms
         private Label lblUsername;
         private Label lblOnline;
         private Label lblChat;
+        private System.Windows.Forms.Button btnDarkMode; // Declare the dark mode button
+
+
 
         protected override void Dispose(bool disposing)
         {
@@ -42,6 +47,9 @@ namespace ChatClientWinForms
             this.lblUsername = new System.Windows.Forms.Label();
             this.lblOnline = new System.Windows.Forms.Label();
             this.lblChat = new System.Windows.Forms.Label();
+            // Declare the button for toggling dark mode
+            this.btnDarkMode = new System.Windows.Forms.Button();  // Declare the button
+
             this.SuspendLayout();
             // 
             // txtServer
@@ -68,9 +76,19 @@ namespace ChatClientWinForms
             this.txtUsername.TabIndex = 2;
             this.txtUsername.Text = "Me";
             // 
+            // --- Dark Mode Toggle Button ---
+            this.btnDarkMode.Location = new System.Drawing.Point(636, 9);  // Position it near the other buttons
+            this.btnDarkMode.Name = "btnDarkMode";
+            this.btnDarkMode.Size = new System.Drawing.Size(75, 23);
+            this.btnDarkMode.TabIndex = 17;
+            this.btnDarkMode.Text = "Dark Mode";
+            this.btnDarkMode.UseVisualStyleBackColor = true;
+            this.btnDarkMode.Visible = true;
+            this.btnDarkMode.Click += new System.EventHandler(this.btnDarkMode_Click);  // Event handler for toggling dark mode
+
             // btnConnect
             // 
-            this.btnConnect.Location = new System.Drawing.Point(496, 9);
+            this.btnConnect.Location = new System.Drawing.Point(476, 9);
             this.btnConnect.Name = "btnConnect";
             this.btnConnect.Size = new System.Drawing.Size(75, 23);
             this.btnConnect.TabIndex = 3;
@@ -81,7 +99,7 @@ namespace ChatClientWinForms
             // btnDisconnect
             // 
             this.btnDisconnect.Enabled = false;
-            this.btnDisconnect.Location = new System.Drawing.Point(577, 9);
+            this.btnDisconnect.Location = new System.Drawing.Point(556, 9);
             this.btnDisconnect.Name = "btnDisconnect";
             this.btnDisconnect.Size = new System.Drawing.Size(75, 23);
             this.btnDisconnect.TabIndex = 4;
@@ -165,6 +183,8 @@ namespace ChatClientWinForms
             // 
             // lblOnline
             // 
+            this.lblOnline.Anchor = ((System.Windows.Forms.AnchorStyles)(((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Bottom)
+            | System.Windows.Forms.AnchorStyles.Right)));
             this.lblOnline.AutoSize = true;
             this.lblOnline.Location = new System.Drawing.Point(535, 46);
             this.lblOnline.Name = "lblOnline";
@@ -181,9 +201,20 @@ namespace ChatClientWinForms
             this.lblChat.TabIndex = 15;
             this.lblChat.Text = "Chat:";
             // 
-            // MainForm
+            // lblTyping
             // 
+            this.lblTyping = new System.Windows.Forms.Label();
+            this.lblTyping.AutoSize = true;
+            this.lblTyping.ForeColor = System.Drawing.Color.Black;
+            this.lblTyping.Location = new System.Drawing.Point(250, 250);  // Adjust as needed
+            this.lblTyping.Name = "lblTyping";
+            this.lblTyping.Size = new System.Drawing.Size(100, 50);
+            this.lblTyping.TabIndex = 16;
+            this.lblTyping.Text = "typing debug";  // initially empty
+
             this.ClientSize = new System.Drawing.Size(724, 371);
+            this.Controls.Add(this.lblTyping);  // Add the label to the form
+            this.Controls.Add(this.btnDarkMode);  // Add the dark mode button to the form
             this.Controls.Add(this.lblChat);
             this.Controls.Add(this.lblOnline);
             this.Controls.Add(this.lblUsername);
@@ -204,5 +235,6 @@ namespace ChatClientWinForms
             this.ResumeLayout(false);
             this.PerformLayout();
         }
+
     }
 }

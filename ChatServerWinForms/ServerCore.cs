@@ -149,6 +149,14 @@ namespace ChatServerWinForms
                 {
                     string line = await reader.ReadLineAsync().ConfigureAwait(false);
                     if (line == null) break; // disconnect
+                    // Typing signal from client: "__TYPING__:on" or "__TYPING__:off"
+                    if (line.StartsWith("__TYPING__:", StringComparison.Ordinal))
+                    {
+                        string state = line.Substring("__TYPING__:".Length).Trim().ToLowerInvariant();
+                        bool isTyping = state == "on";
+                        BroadcastTyping(username, isTyping);
+                        continue;
+                    }
 
                     // Tangani pesan pribadi jika ada
                     if (line.StartsWith("/w"))
@@ -345,5 +353,24 @@ namespace ChatServerWinForms
                 SendSystem(client, "USERS " + usersCsv);  // Kirim daftar pengguna terbaru
             }
         }
+        private void BroadcastTyping(string username, bool isTyping)
+        {
+            if (!isTyping) return;  // Skip broadcasting "off" events
+
+            // Only broadcast when the user is typing
+            string ts = DateTime.Now.ToString("HH:mm:ss");
+            string line = $"[{ts}] [SYS] TYPING {username} on";  // Keep only "on"
+            foreach (var ci in _clients.Values)
+            {
+                try
+                {
+                    var w = new StreamWriter(ci.Stream, Utf8NoBom) { AutoFlush = true };
+                    w.WriteLine(line);
+                }
+                catch { }
+            }
+            SafeLog(line);
+        }
+
     }
 }
