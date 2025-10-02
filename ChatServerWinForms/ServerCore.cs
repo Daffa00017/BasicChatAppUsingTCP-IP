@@ -50,7 +50,11 @@ namespace ChatServerWinForms
         public void Start(int port)
         {
             _cts = new CancellationTokenSource();
-            _listener = new TcpListener(IPAddress.Any, port);
+
+            // Use your machine's IP address or set it to 'IPAddress.Any' for all network interfaces
+            string serverIp = "0.0.0.0";  // Listen on all available network interfaces
+            _listener = new TcpListener(IPAddress.Parse(serverIp), port);
+
             _listener.Start();
 
             SafeLog("Server started on port " + port);

@@ -24,6 +24,7 @@ namespace ChatClientWinForms
     public partial class MainForm : Form
     {
         private ClientCore _client;
+        private ClientCore client;
         // --- Typing indicator state ---
         private readonly System.Windows.Forms.Timer _typingUiTimer = new System.Windows.Forms.Timer();
         private readonly System.Windows.Forms.Timer _sendTypingCooldownTimer = new System.Windows.Forms.Timer();
@@ -34,6 +35,7 @@ namespace ChatClientWinForms
         private readonly TimeSpan _typingSendCooldown = TimeSpan.FromSeconds(1); // throttle network spam
         private System.Windows.Forms.Label lblTyping;
         private readonly System.Windows.Forms.Timer _typingUpdateTimer = new System.Windows.Forms.Timer();
+        private string _selfName = "";
 
 
         public MainForm()
@@ -271,20 +273,19 @@ namespace ChatClientWinForms
         private async void btnConnect_Click(object sender, EventArgs e)
         {
             btnConnect.Enabled = false;
-
-            string host = txtServer.Text.Trim();
+            string host = txtServer.Text.Trim();   // IP address of the server
             int port = 9000;
-            int.TryParse(txtPort.Text.Trim(), out port);
+            int.TryParse(txtPort.Text.Trim(), out port);  // Port to connect to
             string username = txtUsername.Text.Trim();
 
-            bool ok = await _client.ConnectAsync(host, port, username).ConfigureAwait(false);
+            _selfName = username;
+
+            bool ok = await client.ConnectAsync(host, port, username).ConfigureAwait(false);
             if (!ok)
             {
-                // balikkan status tombol di thread UI
-                if (InvokeRequired) Invoke((Action)(() => btnConnect.Enabled = true));
+                if (InvokeRequired) { Invoke((Action)(() => btnConnect.Enabled = true)); }
                 else btnConnect.Enabled = true;
-
-                AddSystemMessage("Connect failed.");
+                _selfName = "";
             }
         }
 
