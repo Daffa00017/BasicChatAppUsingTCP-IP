@@ -165,8 +165,7 @@ namespace ChatServerWinForms
                     }
                     else
                     {
-                        // Pesan umum
-                        BroadcastChat(username, line);
+                        BroadcastChat(info, line);
                     }
                 }
             }
@@ -186,7 +185,7 @@ namespace ChatServerWinForms
                     ClientInfo removed;
                     if (_clients.TryRemove(clientId, out removed))
                     {
-                        BroadcastSystem("LEAVE " + removed.Username);   // Kirim LEAVE hanya saat disconnect
+                        BroadcastSystem("User | " + removed.Username + " | Is Leaving");   // Kirim LEAVE hanya saat disconnect
                         removed.CloseQuietly();
                     }
                 }
@@ -203,14 +202,18 @@ namespace ChatServerWinForms
             }
         }
 
-        private void BroadcastChat(string fromUsername, string text)
+        private void BroadcastChat(ClientInfo fromClient, string text)
         {
             string ts = DateTime.Now.ToString("HH:mm:ss");
-            string line = "[" + ts + "] [" + fromUsername + "] " + text;
+            string line = $"[{ts}] [{fromClient.Username}#{fromClient.Id}] {text}";
             foreach (var ci in _clients.Values)
             {
-                var w = new StreamWriter(ci.Stream, Utf8NoBom) { AutoFlush = true };
-                w.WriteLine(line);
+                try
+                {
+                    var w = new StreamWriter(ci.Stream, Utf8NoBom) { AutoFlush = true };
+                    w.WriteLine(line);
+                }
+                catch { }
             }
             SafeLog(line);
         }
